@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 end_date = datetime.today()
 start_date = end_date - timedelta(days=4 * 365)  # ~4 years
 
-# === 2. Fetch Nifty 100 Symbols from NSE === #
+# === 2. Fetch Nifty 100 Stocks from NSE === #
 def get_nifty100_tickers():
     try:
         url = "https://www.niftyindices.com/IndexConstituent/ind_nifty100list.csv"
@@ -28,14 +28,13 @@ def get_nifty100_tickers():
 tickers = [symbol + ".NS" for symbol in get_nifty100_tickers()]
 results = []
 
-# === 3. Backtest Strategy Logic === #
+# === 3. Backtest Logic === #
 def backtest(ticker):
     try:
         df = yf.download(ticker, start=start_date.strftime("%Y-%m-%d"), end=end_date.strftime("%Y-%m-%d"), progress=False)
         if df.empty or len(df) < 200:
             return
 
-        # Technical indicators
         df['MA50'] = df['Close'].rolling(50).mean()
         df['MA200'] = df['Close'].rolling(200).mean()
         df['Volume_MA20'] = df['Volume'].rolling(20).mean()
@@ -46,7 +45,7 @@ def backtest(ticker):
         df['52W_High'] = df['High'].rolling(252).max()
 
         in_trade = False
-        entry_date, entry_price = None, None
+        entry_date = entry_price = None
 
         for i in range(200, len(df)):
             row = df.iloc[i]
@@ -85,19 +84,21 @@ def backtest(ticker):
                 })
                 in_trade = False
     except Exception as e:
-        print(f"⚠️ {ticker} - Skipped due to error: {e}")
+        print(f"⚠️ {ticker} - Error: {e}")
 
-# === 4. Run Backtest for All Nifty 100 Stocks === #
+# === 4. Run Backtest for All Tickers === #
 print(f"\n🔁 Backtesting {len(tickers)} stocks from {start_date.date()} to {end_date.date()}...\n")
 for t in tickers:
     print(f"→ Running for: {t}")
     backtest(t)
 
-# === 5. Export & Display Results === #
+# === 5. Export Results === #
 df_results = pd.DataFrame(results)
-df_results.sort_values(by="Entry Date", inplace=True)
-df_results.to_csv("nifty100_bullish_trades_backtest.csv", index=False)
 
-print("\n✅ Backtest Completed.")
-print("Top 10 Trades:\n")
-print(df_results.head(10))
+if not df_results.empty:
+    df_results.sort_values(by="Entry Date", inplace=True)
+    df_results.to_csv("nifty100_bullish_trades_backtest.csv", index=False)
+    print("\n✅ Backtest Completed. Top 10 Trades:\n")
+    print(df_results.head(10))
+else:
+    print("\n⚠️ No bullish trades found based on current strategy logic and data.")

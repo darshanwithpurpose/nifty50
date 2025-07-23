@@ -1,15 +1,15 @@
-import streamlit as st
 import yfinance as yf
 import pandas as pd
 import ta
 import requests
 from io import StringIO
+from datetime import datetime, timedelta
 
-st.set_page_config(page_title="Nifty 100 Bullish Screener", layout="wide")
-st.title("📈 Nifty 100 Bullish Trade Screener")
+# === 1. Dynamic Date Range === #
+end_date = datetime.today()
+start_date = end_date - timedelta(days=4 * 365)  # ~4 years
 
-# ---- Function to Fetch Nifty 100 Tickers from NSE ---- #
-@st.cache_data
+# === 2. Fetch Nifty 100 Symbols from NSE === #
 def get_nifty100_tickers():
     try:
         url = "https://www.niftyindices.com/IndexConstituent/ind_nifty100list.csv"
@@ -17,68 +17,87 @@ def get_nifty100_tickers():
             "User-Agent": "Mozilla/5.0",
             "Referer": "https://www.niftyindices.com/"
         }
-        response = requests.get(url, headers=headers, timeout=10)
-        response.raise_for_status()
-        df = pd.read_csv(StringIO(response.text))
+        r = requests.get(url, headers=headers, timeout=10)
+        r.raise_for_status()
+        df = pd.read_csv(StringIO(r.text))
         return df['Symbol'].str.strip().tolist()
     except Exception as e:
-        st.error("❌ Failed to fetch Nifty 100 tickers from NSE.")
+        print("❌ Error fetching Nifty 100 tickers:", e)
         return []
 
-# ---- Fetch and Process Stocks ---- #
-nifty100 = get_nifty100_tickers()
-if not nifty100:
-    st.stop()
+tickers = [symbol + ".NS" for symbol in get_nifty100_tickers()]
+results = []
 
-selected_stocks = []
-progress_bar = st.progress(0)
-
-for i, ticker in enumerate(nifty100):
-    progress_bar.progress((i + 1) / len(nifty100))
-
-    symbol = ticker + ".NS"
+# === 3. Backtest Strategy Logic === #
+def backtest(ticker):
     try:
-        df = yf.download(symbol, period="6mo", interval="1d", progress=False)
+        df = yf.download(ticker, start=start_date.strftime("%Y-%m-%d"), end=end_date.strftime("%Y-%m-%d"), progress=False)
         if df.empty or len(df) < 200:
-            continue
+            return
 
-        df['MA50'] = df['Close'].rolling(window=50).mean()
-        df['MA200'] = df['Close'].rolling(window=200).mean()
-        df['Volume_MA20'] = df['Volume'].rolling(window=20).mean()
+        # Technical indicators
+        df['MA50'] = df['Close'].rolling(50).mean()
+        df['MA200'] = df['Close'].rolling(200).mean()
+        df['Volume_MA20'] = df['Volume'].rolling(20).mean()
         df['RSI'] = ta.momentum.RSIIndicator(df['Close']).rsi()
         macd = ta.trend.MACD(df['Close'])
         df['MACD'] = macd.macd()
         df['MACD_signal'] = macd.macd_signal()
+        df['52W_High'] = df['High'].rolling(252).max()
 
-        last = df.iloc[-1]
-        high_52wk = df['High'].max()
+        in_trade = False
+        entry_date, entry_price = None, None
 
-        # ---- Bullish Criteria ---- #
-        if (
-            last['Close'] > last['MA50'] > last['MA200'] and
-            55 < last['RSI'] < 70 and
-            last['MACD'] > last['MACD_signal'] and
-            last['Volume'] > last['Volume_MA20'] and
-            last['Close'] >= 0.95 * high_52wk
-        ):
-            selected_stocks.append({
-                "Symbol": ticker,
-                "Close Price": round(last['Close'], 2),
-                "RSI(14)": round(last['RSI'], 2),
-                "Volume": int(last['Volume']),
-                "52-Week High": round(high_52wk, 2)
-            })
-    except Exception:
-        continue
+        for i in range(200, len(df)):
+            row = df.iloc[i]
 
-progress_bar.empty()
+            # Entry condition
+            if not in_trade and (
+                row['Close'] > row['MA50'] > row['MA200'] and
+                55 < row['RSI'] < 70 and
+                row['MACD'] > row['MACD_signal'] and
+                row['Volume'] > row['Volume_MA20'] and
+                row['Close'] >= 0.95 * row['52W_High']
+            ):
+                in_trade = True
+                entry_date = row.name
+                entry_price = row['Close']
 
-# ---- Show Results ---- #
-st.subheader("🔍 Bullish Candidates from Nifty 100")
-if selected_stocks:
-    st.dataframe(pd.DataFrame(selected_stocks))
-    st.success(f"✅ {len(selected_stocks)} bullish stock(s) found.")
-else:
-    st.warning("⚠️ No bullish setups found based on the current logic.")
+            # Exit condition
+            elif in_trade and (
+                row['RSI'] < 50 or
+                row['MACD'] < row['MACD_signal'] or
+                row['Close'] < row['MA50']
+            ):
+                exit_date = row.name
+                exit_price = row['Close']
+                pct_return = ((exit_price - entry_price) / entry_price) * 100
+                holding_days = (exit_date - entry_date).days
 
-st.caption("Logic: Price > MA50 > MA200 • RSI(14) between 55–70 • MACD Bullish Crossover • Volume > 20-day average • Close near 52W High")
+                results.append({
+                    "Stock": ticker.replace(".NS", ""),
+                    "Entry Date": entry_date.date(),
+                    "Entry Price": round(entry_price, 2),
+                    "Exit Date": exit_date.date(),
+                    "Exit Price": round(exit_price, 2),
+                    "% Return": round(pct_return, 2),
+                    "Holding Days": holding_days
+                })
+                in_trade = False
+    except Exception as e:
+        print(f"⚠️ {ticker} - Skipped due to error: {e}")
+
+# === 4. Run Backtest for All Nifty 100 Stocks === #
+print(f"\n🔁 Backtesting {len(tickers)} stocks from {start_date.date()} to {end_date.date()}...\n")
+for t in tickers:
+    print(f"→ Running for: {t}")
+    backtest(t)
+
+# === 5. Export & Display Results === #
+df_results = pd.DataFrame(results)
+df_results.sort_values(by="Entry Date", inplace=True)
+df_results.to_csv("nifty100_bullish_trades_backtest.csv", index=False)
+
+print("\n✅ Backtest Completed.")
+print("Top 10 Trades:\n")
+print(df_results.head(10))
